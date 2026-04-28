@@ -4,123 +4,163 @@ import plotly.graph_objects as go
 import time
 import numpy as np
 
+# Configuração da página
 st.set_page_config(page_title="DataScout Pro Ultimate", layout="wide")
 
 # --- CONFIGURAÇÕES ---
 LIGAS = {
-    "Brasileirão": "24", "Premier League": "9", "La Liga": "12", 
-    "Serie A (ITA)": "11", "Bundesliga": "20", "Ligue 1": "13"
+    "Premier League": "9", 
+    "Brasileirão": "24", 
+    "La Liga": "12", 
+    "Serie A (ITA)": "11", 
+    "Bundesliga": "20", 
+    "Ligue 1": "13"
 }
 
-# --- MOTOR DE EXTRAÇÃO (MELHORADO) ---
+# --- MOTOR DE EXTRAÇÃO (VERSÃO ROBUSTA) ---
 @st.cache_data(ttl=86400)
 def get_full_data(league_id):
     def scrape(cat):
+        # Forçamos o uso da URL em inglês para garantir nomes de colunas consistentes
         url = f"https://fbref.com/en/comps/{league_id}/{cat}/players"
-        time.sleep(3) # Respeitando o limite do FBref
+        
+        # Delay de segurança para evitar bloqueio (Rate Limit do FBref)
+        time.sleep(5) 
+        
         try:
-            df = pd.read_html(url, header=1)[0]
-            df = df[df['Player'] != 'Player'].copy()
-            # Remove colunas duplicadas que aparecem no merge depois
-            cols_to_keep = ['Player', 'Squad', 'Age', 'Pos'] + [c for c in df.columns if c not in ['Player', 'Nation', 'Pos', 'Squad', 'Age', 'Born', 'Matches']]
-            return df[cols_to_keep]
-        except:
+            # Simulando um navegador para diminuir chances de bloqueio
+            storage = pd.read_html(url, header=1)
+            if len(storage) == 0:
+                return pd.DataFrame()
+            
+            df = storage[0]
+            
+            # Limpeza: Remove linhas que repetem o cabeçalho no meio da tabela
+            if 'Player' in df.columns:
+                df = df[df['Player'] != 'Player'].copy()
+                return df
+            else:
+                return pd.DataFrame()
+        except Exception as e:
             return pd.DataFrame()
 
-    # Puxa duas tabelas e junta (Merge)
+    # Tenta pegar a primeira tabela (Estatísticas Gerais)
     df_std = scrape("stats")
+    
+    # Se a primeira tabela falhar, retorna None para o app tratar
+    if df_std.empty or 'Player' not in df_std.columns:
+        return None
+
+    # Tenta pegar a segunda tabela (Finalizações)
     df_shoot = scrape("shooting")
     
-    if not df_shoot.empty:
-        # Junta as tabelas pelo nome do jogador e time
-        df_final = pd.merge(df_std, df_shoot, on=['Player', 'Squad', 'Age', 'Pos'], suffixes=('', '_drop'))
-        # Remove colunas repetidas
-        df_final = df_final.loc[:, ~df_final.columns.str.contains('_drop')]
-        
-        # Limpeza Numérica
-        for col in df_final.columns:
-            if col not in ['Player', 'Squad', 'Pos']:
-                df_final[col] = pd.to_numeric(df_final[col], errors='coerce').fillna(0)
-        return df_final
+    # Se a segunda tabela existir, faz o merge. Se não, usa só a primeira.
+    if not df_shoot.empty and 'Player' in df_shoot.columns:
+        # Colunas úteis da segunda tabela (evitando repetir info básica)
+        cols_to_use = [c for c in df_shoot.columns if c not in ['Nation', 'Pos', 'Squad', 'Age', 'Born', 'Matches']]
+        try:
+            df_final = pd.merge(df_std, df_shoot[cols_to_use], on=['Player'], how='left', suffixes=('', '_drop'))
+            df_final = df_final.loc[:, ~df_final.columns.str.contains('_drop')]
+            
+            # Converte colunas para numérico
+            for col in df_final.columns:
+                if col not in ['Player', 'Squad', 'Pos']:
+                    df_final[col] = pd.to_numeric(df_final[col], errors='coerce').fillna(0)
+            return df_final
+        except:
+            return df_std
+    
     return df_std
 
 # --- LÓGICA DE SIMILARIDADE ---
 def buscar_similares(df, nome_jogador, metricas):
     if nome_jogador not in df['Player'].values: return None
     
-    # Normaliza os dados para o cálculo de distância
     df_norm = df.copy()
     for m in metricas:
-        if df_norm[m].max() != 0:
+        if m in df_norm.columns and df_norm[m].max() != 0:
             df_norm[m] = df_norm[m] / df_norm[m].max()
             
     alvo = df_norm[df_norm['Player'] == nome_jogador][metricas].values[0]
     
-    # Cálculo de Distância Euclidiana (quem está mais perto matematicamente)
     distancias = []
     for idx, row in df_norm.iterrows():
         dist = np.linalg.norm(alvo - row[metricas].values)
         distancias.append(dist)
     
-    df['Similaridade'] = distancias
-    return df.sort_values(by='Similaridade').head(6) # O primeiro é ele mesmo
+    df['Similaridade_Score'] = distancias
+    return df.sort_values(by='Similaridade_Score').head(6)
 
 # --- INTERFACE ---
-st.title("🚀 DataScout Pro Ultimate")
+st.title("🚀 DataScout Pro: Expert Edition")
 
-liga = st.sidebar.selectbox("Liga", list(LIGAS.keys()))
-df = get_full_data(LIGAS[liga])
+with st.sidebar:
+    st.header("Configuração")
+    liga_nome = st.selectbox("Selecione a Liga", list(LIGAS.keys()))
+    st.info("Nota: O FBref limita o acesso. Se der erro, aguarde 1 minuto e mude a liga.")
 
-if df is not None:
-    menu = st.tabs(["📊 Comparativo", "🧬 Busca por Similaridade", "🔝 Rankings"])
+# Carregamento dos dados
+df = get_full_data(LIGAS[liga_nome])
 
-    # --- TABELA DE COMPARAÇÃO ---
+# VERIFICAÇÃO DE SEGURANÇA
+if df is not None and not df.empty and 'Player' in df.columns:
+    
+    menu = st.tabs(["📊 Comparativo Radar", "🧬 Busca por Similaridade", "🔝 Rankings"])
+
+    # --- TAB 1: COMPARATIVO ---
     with menu[0]:
         c1, c2 = st.columns(2)
-        p1 = c1.selectbox("Jogador 1", df['Player'].unique(), index=0)
-        p2 = c2.selectbox("Jogador 2", df['Player'].unique(), index=1)
+        with c1:
+            p1 = st.selectbox("Jogador 1", df['Player'].unique(), index=0)
+        with c2:
+            p2 = st.selectbox("Jogador 2", df['Player'].unique(), index=1)
         
-        m_escolhidas = st.multiselect("Métricas", [c for c in df.columns if c not in ['Player', 'Squad', 'Pos']], default=['Gls', 'xG', 'Ast', 'xA', 'Sh'])
+        # Filtra métricas numéricas para o radar
+        metricas_default = ['Gls', 'xG', 'Ast', 'xA']
+        colunas_num = [c for c in df.columns if c not in ['Player', 'Squad', 'Pos', 'Age', 'Nation']]
         
-        # Cards de Destaque
-        d1 = df[df['Player'] == p1].iloc[0]
-        d2 = df[df['Player'] == p2].iloc[0]
+        m_escolhidas = st.multiselect("Métricas para o Radar", colunas_num, default=[m for m in metricas_default if m in colunas_num])
         
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        col_m1.metric(f"Gols {p1}", d1['Gls'])
-        col_m2.metric(f"Gols {p2}", d2['Gls'], delta=float(d2['Gls']-d1['Gls']))
-        col_m3.metric(f"xG {p1}", d1['xG'])
-        col_m4.metric(f"xG {p2}", d2['xG'], delta=round(float(d2['xG']-d1['xG']), 2))
+        if len(m_escolhidas) >= 3:
+            # Normalização temporária para o gráfico
+            df_radar = df.copy()
+            for m in m_escolhidas:
+                max_val = df_radar[m].max()
+                if max_val > 0: df_radar[m] = df_radar[m] / max_val
+            
+            d1 = df_radar[df_radar['Player'] == p1].iloc[0]
+            d2 = df_radar[df_radar['Player'] == p2].iloc[0]
 
-        # Radar
-        df_radar = df.copy()
-        for m in m_escolhidas: df_radar[m] = df_radar[m] / df_radar[m].max()
-        r1 = df_radar[df_radar['Player'] == p1].iloc[0]
-        r2 = df_radar[df_radar['Player'] == p2].iloc[0]
-        
-        fig = go.Figure()
-        fig.add_trace(go.Scatterpolar(r=[r1[m] for m in m_escolhidas], theta=m_escolhidas, fill='toself', name=p1))
-        fig.add_trace(go.Scatterpolar(r=[r2[m] for m in m_escolhidas], theta=m_escolhidas, fill='toself', name=p2))
-        st.plotly_chart(fig)
+            fig = go.Figure()
+            fig.add_trace(go.Scatterpolar(r=[d1[m] for m in m_escolhidas], theta=m_escolhidas, fill='toself', name=p1))
+            fig.add_trace(go.Scatterpolar(r=[d2[m] for m in m_escolhidas], theta=m_escolhidas, fill='toself', name=p2, fillcolor='rgba(255, 0, 0, 0.3)'))
+            fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), title="Comparação de Performance (Relativa ao melhor da liga)")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("Selecione pelo menos 3 métricas.")
 
-    # --- TABELA DE SIMILARIDADE ---
+    # --- TAB 2: SIMILARIDADE ---
     with menu[1]:
-        st.subheader("Encontre jogadores com estilo de jogo parecido")
-        ref_p = st.selectbox("Selecione o Jogador de Referência", df['Player'].unique())
+        st.subheader("🧬 Encontre jogadores com estilo parecido")
+        ref_p = st.selectbox("Selecione o Jogador de Referência", df['Player'].unique(), key="sim_box")
         
-        metricas_estilo = ['Gls', 'xG', 'Sh', 'SoT', 'Dist', 'FK', 'PK']
+        # Usamos métricas de estilo (chutes e gols)
+        metricas_estilo = [m for m in ['Gls', 'xG', 'Sh', 'SoT', 'Dist'] if m in df.columns]
         
-        if st.button("Buscar Sósias"):
+        if st.button("Buscar Jogadores Similares"):
             similares = buscar_similares(df, ref_p, metricas_estilo)
-            st.write(f"Jogadores mais parecidos com {ref_p} baseados em finalizações:")
-            st.table(similares[['Player', 'Squad', 'Age', 'Pos', 'Gls', 'xG']])
+            st.write(f"Jogadores matematicamente mais parecidos com {ref_p}:")
+            st.dataframe(similares[['Player', 'Squad', 'Age', 'Pos'] + metricas_estilo])
 
-    # --- TABELA DE RANKINGS ---
+    # --- TAB 3: RANKINGS ---
     with menu[2]:
-        st.subheader("Top 10 por Métrica")
-        metrica_top = st.selectbox("Escolha a métrica", [c for c in df.columns if c not in ['Player', 'Squad', 'Pos']])
-        top10 = df.nlargest(10, metrica_top)[['Player', 'Squad', 'Age', metrica_top]]
-        st.table(top10)
+        st.subheader("🔝 Top 15 da Liga")
+        metrica_top = st.selectbox("Ordenar por:", [c for c in df.columns if c not in ['Player', 'Squad', 'Pos', 'Nation']])
+        top15 = df.nlargest(15, metrica_top)[['Player', 'Squad', 'Age', 'Pos', metrica_top]]
+        st.dataframe(top15.style.background_gradient(cmap='Greens'))
 
 else:
-    st.warning("Carregando dados...")
+    # MENSAGEM DE ERRO CASO O FBREF BLOQUEIE
+    st.error("⚠️ Não foi possível encontrar a coluna 'Player' nos dados.")
+    st.warning("Isso geralmente acontece porque o FBref bloqueou o acesso temporário do servidor do Streamlit (Rate Limit).")
+    st.info("O que fazer? \n1. Espere 1 ou 2 minutos e atualize a página. \n2. Tente selecionar outra liga na barra lateral. \n3. Se estiver rodando localmente, verifique sua conexão.")
