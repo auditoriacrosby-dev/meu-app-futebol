@@ -4,3 +4,4 @@ plotly
 lxml
 numpy
 beautifulsoup4
+requests
